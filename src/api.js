@@ -179,13 +179,22 @@ async function _fetch(path) {
  */
 export async function fetchSensorData() {
   if (_commMode === 'PORT') {
-    if (_lastData) {
-      if (Date.now() - _lastDataTime > 8000) {
-        throw new Error("Serial data timeout");
+    if (!_lastData) {
+      if (Date.now() - _lastDataTime < 8000) {
+        // Still waiting for first data packet, return an empty placeholder
+        return {
+          distance: 0, methane: 0, pressure: 1013.25,
+          outsideTemp: 0, humidity: 0, slurryTemp: 0,
+          stirrer: false, grinder: false, outlet: false,
+          __waiting: true
+        };
       }
-      return _lastData;
+      throw new Error("No data received yet via serial");
     }
-    throw new Error("No data received yet via serial");
+    if (Date.now() - _lastDataTime > 8000) {
+      throw new Error("Serial data timeout");
+    }
+    return _lastData;
   } else {
     // Mode is IP or fallback
     const raw = await _fetch('/api/data');
