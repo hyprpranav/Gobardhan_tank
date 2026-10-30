@@ -1,211 +1,273 @@
 /**
- * api.js — GOBARDHAN ESP32 Communication Layer
- * Supports Web Serial API (Primary) and HTTP IP API (Secondary)
+ * api.js — GOBARDHAN High-Speed USB Serial Communication Layer
+ * (Dedicated Web Serial API Driver — 115200 Baud, Event-Driven, No Wi-Fi)
  */
 
-const ESP32_CONFIG_KEY = 'gobardhan_esp32_ip';
-const REQUEST_TIMEOUT_MS = 5000;
-
-// ---- Internal state ----
-let _esp32Ip = localStorage.getItem(ESP32_CONFIG_KEY) || '';
-let _isConnected = false;
-let _lastDataTime = null;
-let _onConnectionChange = null;
-let _lastData = null;
-
-// Serial State
-let _commMode = 'NONE'; // 'PORT' or 'IP'
+// Internal state
 let _port = null;
 let _reader = null;
-let _writer = null;
+let _isConnected = false;
+let _isConnectedRequested = false;
+let _lastData = null;
+let _lastDataTime = null;
+let _packetCount = 0;
+let _readLoopPromise = null;
 
-// ---- Public API ----
+// Callbacks
+const _connectionListeners = new Set();
+const _dataListeners = new Set();
 
-export function setEsp32Ip(ip) {
-  _esp32Ip = ip.trim();
-  localStorage.setItem(ESP32_CONFIG_KEY, _esp32Ip);
+/**
+ * Register connection state change listener
+ * @param {(connected: boolean, error?: string) => void} callback
+ */
+export function onConnectionChange(callback) {
+  if (typeof callback === 'function') {
+    _connectionListeners.add(callback);
+  }
 }
 
-export function getEsp32Ip() {
-  return _esp32Ip;
+/**
+ * Remove connection listener
+ */
+export function offConnectionChange(callback) {
+  _connectionListeners.delete(callback);
 }
 
-export function getLastDataTime() {
-  return _lastDataTime;
+/**
+ * Register sensor data packet listener (Event-Driven)
+ * @param {(data: object) => void} callback
+ */
+export function onData(callback) {
+  if (typeof callback === 'function') {
+    _dataListeners.add(callback);
+    // If we already have recent data, deliver it immediately
+    if (_lastData) {
+      try { callback(_lastData); } catch (e) { console.error(e); }
+    }
+  }
+}
+
+/**
+ * Remove data listener
+ */
+export function offData(callback) {
+  _dataListeners.delete(callback);
+}
+
+function _setConnected(state, err = null) {
+  if (_isConnected !== state) {
+    _isConnected = state;
+    _connectionListeners.forEach(fn => {
+      try { fn(state, err); } catch (e) { console.error(e); }
+    });
+  }
+}
+
+function _emitData(data) {
+  _dataListeners.forEach(fn => {
+    try { fn(data); } catch (e) { console.error(e); }
+  });
 }
 
 export function isConnected() {
   return _isConnected;
 }
 
-export function getCommMode() {
-  return _commMode;
+export function getLastData() {
+  return _lastData;
 }
 
-export function onConnectionChange(cb) {
-  _onConnectionChange = cb;
+export function getLastDataTime() {
+  return _lastDataTime;
 }
 
-function _setConnected(connected) {
-  if (_isConnected !== connected) {
-    _isConnected = connected;
-    if (_onConnectionChange) _onConnectionChange(connected);
-  }
+export function getPacketCount() {
+  return _packetCount;
 }
 
-// ==== Serial Implementation ====
-
-export async function connectPort() {
-  try {
-    if (!navigator.serial) {
-      throw new Error("Web Serial API not supported in this browser.");
+/**
+ * Listen for physical hardware detach
+ */
+if (typeof navigator !== 'undefined' && 'serial' in navigator) {
+  navigator.serial.addEventListener('disconnect', (event) => {
+    if (event.target === _port) {
+      console.warn('[GOBARDHAN] USB Serial Device was physically disconnected.');
+      disconnectPort('Device unplugged');
     }
+  });
+}
+
+/**
+ * Connect to ESP32 via Web Serial API
+ */
+export async function connectPort() {
+  if (!navigator.serial) {
+    const msg = 'Web Serial API is not supported in this browser. Please use Google Chrome or Microsoft Edge.';
+    _setConnected(false, msg);
+    throw new Error(msg);
+  }
+
+  // Close existing port if any
+  if (_port) {
+    await disconnectPort();
+  }
+
+  try {
+    // Prompt user to select ESP32 COM port
     _port = await navigator.serial.requestPort();
-    await _port.open({ baudRate: 115200 }); // ESP32 is set to 115200
-    _commMode = 'PORT';
-    _setConnected(true);
+    await _port.open({
+      baudRate: 115200,
+      bufferSize: 8192,
+    });
+
+    _isConnectedRequested = true;
     _lastDataTime = Date.now();
-    _startSerialReadLoop();
+    _packetCount = 0;
+    _setConnected(true);
+
+    console.log('[GOBARDHAN] Serial port opened at 115200 baud.');
+
+    // Start background stream reader loop
+    _readLoopPromise = _runReadLoop();
     return true;
   } catch (err) {
-    console.error('Serial connection failed:', err);
+    console.error('[GOBARDHAN] Failed to open Serial Port:', err);
+    _port = null;
+    _isConnectedRequested = false;
+    _setConnected(false, err.message);
     return false;
   }
 }
 
-export async function disconnectPort() {
+/**
+ * Disconnect and release locks
+ */
+export async function disconnectPort(reason = 'User disconnected') {
+  console.log('[GOBARDHAN] Disconnecting serial port:', reason);
+  _isConnectedRequested = false;
+
   if (_reader) {
-    await _reader.cancel().catch(() => { });
+    try {
+      await _reader.cancel();
+    } catch (_) { /* ignore cancel error */ }
+    try {
+      _reader.releaseLock();
+    } catch (_) { /* ignore lock error */ }
     _reader = null;
   }
-  if (_writer) {
-    _writer.releaseLock();
-    _writer = null;
-  }
+
   if (_port) {
-    await _port.close().catch(() => { });
+    try {
+      await _port.close();
+    } catch (e) {
+      console.debug('[GOBARDHAN] Error while closing port:', e);
+    }
     _port = null;
   }
-  _commMode = 'NONE';
+
   _setConnected(false);
+  console.log('[GOBARDHAN] Serial port successfully closed.');
 }
 
-async function _startSerialReadLoop() {
-  if (!_port) return;
-  const textDecoder = new TextDecoderStream();
-  const readableStreamClosed = _port.readable.pipeTo(textDecoder.writable);
-  _reader = textDecoder.readable.getReader();
-
+/**
+ * Continuous, error-resilient Serial Read Loop
+ */
+async function _runReadLoop() {
+  const decoder = new TextDecoder('utf-8');
   let buffer = '';
-  try {
-    while (true) {
-      const { value, done } = await _reader.read();
-      if (done) break;
-      buffer += value;
 
-      let lines = buffer.split('\n');
-      buffer = lines.pop(); // Re-assign buffer to incomplete last line
+  while (_port && _isConnectedRequested) {
+    if (!_port.readable) {
+      console.warn('[GOBARDHAN] Port is not readable, waiting...');
+      await new Promise(r => setTimeout(r, 500));
+      continue;
+    }
 
-      for (let line of lines) {
-        line = line.trim();
-        if (line.startsWith('{') && line.endsWith('}')) {
-          try {
-            const data = JSON.parse(line);
-            if (data.methane !== undefined || data.distance !== undefined) {
-              _lastData = parseSensorData(data);
-              _lastDataTime = Date.now();
-              _setConnected(true);
+    try {
+      _reader = _port.readable.getReader();
+    } catch (lockErr) {
+      console.warn('[GOBARDHAN] Could not get readable stream lock:', lockErr);
+      await new Promise(r => setTimeout(r, 500));
+      continue;
+    }
+
+    try {
+      while (_isConnectedRequested) {
+        const { value, done } = await _reader.read();
+        if (done) {
+          console.log('[GOBARDHAN] Readable stream done.');
+          break;
+        }
+
+        if (value) {
+          // Decode chunk
+          buffer += decoder.decode(value, { stream: true });
+
+          // Split by newline
+          const lines = buffer.split(/[\r\n]+/);
+          // Keep the last incomplete fragment in buffer
+          buffer = lines.pop() ?? '';
+
+          for (const rawLine of lines) {
+            const line = rawLine.trim();
+            if (!line) continue;
+
+            // Extract JSON substring between outermost braces { ... }
+            const startIdx = line.indexOf('{');
+            const endIdx = line.lastIndexOf('}');
+            if (startIdx === -1 || endIdx === -1 || endIdx <= startIdx) {
+              continue;
             }
-          } catch (e) {
-            // Ignore parse errors on partial JSON
+
+            const jsonStr = line.substring(startIdx, endIdx + 1);
+            try {
+              const parsed = JSON.parse(jsonStr);
+
+              // Check if it's a sensor telemetry packet
+              if (parsed.distance !== undefined || parsed.methane !== undefined) {
+                const cleanData = _parseSensorData(parsed);
+                _lastData = cleanData;
+                _lastDataTime = Date.now();
+                _packetCount++;
+                _setConnected(true);
+                _emitData(cleanData);
+              } else if (parsed.ok !== undefined) {
+                // Command response / ack
+                console.log('[GOBARDHAN] ESP32 Ack:', parsed);
+              }
+            } catch (jsonErr) {
+              // Ignore corrupted or partial JSON fragments during serial sync
+              console.debug('[GOBARDHAN] Non-JSON line ignored:', jsonStr.substring(0, 40));
+            }
           }
         }
       }
+    } catch (readErr) {
+      if (_isConnectedRequested) {
+        console.warn('[GOBARDHAN] Transient read error (resuming):', readErr.message);
+      }
+    } finally {
+      if (_reader) {
+        try {
+          _reader.releaseLock();
+        } catch (_) {}
+        _reader = null;
+      }
     }
-  } catch (error) {
-    console.warn("Serial read broken:", error);
-  } finally {
-    _reader.releaseLock();
-    disconnectPort();
+
+    // If user cancelled, don't attempt to re-read
+    if (!_isConnectedRequested) break;
+
+    // Small delay before re-attaching reader to avoid busy loop on error
+    await new Promise(r => setTimeout(r, 250));
   }
 }
-
-async function _sendSerialCommand(cmdStr) {
-  if (!_port || !_port.writable) throw new Error("Serial port not writable");
-  if (!_writer) {
-    const textEncoder = new TextEncoderStream();
-    const writableStreamClosed = textEncoder.readable.pipeTo(_port.writable);
-    _writer = textEncoder.writable.getWriter();
-  }
-  await _writer.write(cmdStr + '\n');
-  _lastDataTime = Date.now();
-  _setConnected(true);
-  return { ok: true };
-}
-
-// ==== HTTP Fetch Implementation ====
-
-function _buildUrl(path) {
-  if (!_esp32Ip) throw new Error('ESP32 IP address not configured.');
-  return `http://${_esp32Ip}${path}`;
-}
-
-async function _fetch(path) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
-  try {
-    const response = await fetch(_buildUrl(path), {
-      method: 'GET',
-      signal: controller.signal,
-      mode: 'cors',
-      headers: { 'Accept': 'application/json' },
-    });
-    clearTimeout(timer);
-    if (!response.ok) {
-      throw new Error(`HTTP ${response.status}`);
-    }
-    return await response.json();
-  } catch (err) {
-    clearTimeout(timer);
-    throw err;
-  }
-}
-
-// ---- Public Data Functions ----
 
 /**
- * Fetch sensor data from ESP32
- * Depending on the active mode (PORT vs IP), returns cached serial data or fetches via HTTP
+ * Normalize and sanitize incoming sensor data
  */
-export async function fetchSensorData() {
-  if (_commMode === 'PORT') {
-    if (!_lastData) {
-      if (Date.now() - _lastDataTime < 8000) {
-        // Still waiting for first data packet, return an empty placeholder
-        return {
-          distance: 0, methane: 0, pressure: 1013.25,
-          outsideTemp: 0, humidity: 0, slurryTemp: 0,
-          stirrer: false, grinder: false, outlet: false,
-          __waiting: true
-        };
-      }
-      throw new Error("No data received yet via serial");
-    }
-    if (Date.now() - _lastDataTime > 8000) {
-      throw new Error("Serial data timeout");
-    }
-    return _lastData;
-  } else {
-    // Mode is IP or fallback
-    const raw = await _fetch('/api/data');
-    _commMode = 'IP';
-    _setConnected(true);
-    _lastDataTime = Date.now();
-    return parseSensorData(raw);
-  }
-}
-
-function parseSensorData(raw) {
+function _parseSensorData(raw) {
   return {
     distance: _toFloat(raw.distance, 0),
     methane: _toFloat(raw.methane, 0),
@@ -213,9 +275,9 @@ function parseSensorData(raw) {
     outsideTemp: _toFloat(raw.outsideTemp, 0),
     humidity: _toFloat(raw.humidity, 0),
     slurryTemp: _toFloat(raw.slurryTemp, 0),
-    stirrer: !!raw.stirrer,
-    grinder: !!raw.grinder,
-    outlet: !!raw.outlet,
+    stirrer: Boolean(raw.stirrer),
+    grinder: Boolean(raw.grinder),
+    outlet: Boolean(raw.outlet),
   };
 }
 
@@ -224,49 +286,33 @@ function _toFloat(val, fallback) {
   return isNaN(n) ? fallback : n;
 }
 
-export function markDisconnected() {
-  _setConnected(false);
-}
-
-// ---- Control Commands ----
-
-async function _sendCommand(path, serialCmd) {
-  if (_commMode === 'PORT') {
-    return _sendSerialCommand(JSON.stringify({ cmd: serialCmd }));
-  } else {
-    const result = await _fetch(path);
-    _setConnected(true);
-    _lastDataTime = Date.now();
-    return result;
-  }
-}
-
-export async function stirrerOn() { return _sendCommand('/api/stirrer/on', 'stirrerOn'); }
-export async function stirrerOff() { return _sendCommand('/api/stirrer/off', 'stirrerOff'); }
-export async function grinderOn() { return _sendCommand('/api/grinder/on', 'grinderOn'); }
-export async function grinderOff() { return _sendCommand('/api/grinder/off', 'grinderOff'); }
-export async function outletOpen() { return _sendCommand('/api/outlet/open', 'outletOpen'); }
-export async function outletClose() { return _sendCommand('/api/outlet/close', 'outletClose'); }
-
 /**
- * Validates HTTP IP Connection
+ * Send command JSON string to ESP32
  */
-export async function testConnection(ip) {
-  const preferred = (ip || _esp32Ip || '').trim();
-  const candidates = [preferred, '10.129.159.200'].filter(Boolean); // simplified probe for time
-
-  const originalIp = _esp32Ip;
-  for (const candidate of candidates) {
-    try {
-      _esp32Ip = candidate;
-      await _fetch('/api/data');
-      localStorage.setItem(ESP32_CONFIG_KEY, candidate);
-      _commMode = 'IP';
-      return true;
-    } catch { }
+async function _sendSerialCommand(cmdName) {
+  if (!_port || !_port.writable) {
+    throw new Error('Serial port not connected or not writable');
   }
-  _esp32Ip = originalIp;
-  _setConnected(false);
-  return false;
+
+  const writer = _port.writable.getWriter();
+  try {
+    const payload = JSON.stringify({ cmd: cmdName }) + '\n';
+    const encoded = new TextEncoder().encode(payload);
+    await writer.write(encoded);
+    console.log('[GOBARDHAN] Command sent:', cmdName);
+    return { ok: true, cmd: cmdName };
+  } finally {
+    try {
+      writer.releaseLock();
+    } catch (_) {}
+  }
 }
 
+// Actuator command wrappers
+export async function stirrerOn()   { return _sendSerialCommand('stirrerOn'); }
+export async function stirrerOff()  { return _sendSerialCommand('stirrerOff'); }
+export async function grinderOn()   { return _sendSerialCommand('grinderOn'); }
+export async function grinderOff()  { return _sendSerialCommand('grinderOff'); }
+export async function outletOpen()  { return _sendSerialCommand('outletOpen'); }
+export async function outletClose() { return _sendSerialCommand('outletClose'); }
+export async function requestData() { return _sendSerialCommand('getData'); }

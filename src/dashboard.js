@@ -1,6 +1,7 @@
 /**
  * dashboard.js — GOBARDHAN Dashboard Logic
- * Renders and manages the entire dashboard UI.
+ * Dedicated High-Speed USB Serial Integration (No Wi-Fi)
+ * Event-driven real-time sensor updates and actuator control.
  */
 
 import * as api from './api.js';
@@ -13,10 +14,8 @@ import { showToast } from './main.js';
 
 // ---- State ----
 let drumHeight = 80;   // cm — configurable
-let pollTimer = null;
 let sensorData = null;
-
-const POLL_INTERVAL_MS = 3000; // 3 seconds
+let clockTimer = null;
 
 // ---- Icons (inline SVG strings from Lucide) ----
 const icons = {
@@ -30,16 +29,12 @@ const icons = {
   activity: `<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M3 12h3l3-9 4 18 3-9h5"/></svg>`,
   power: `<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M5.636 5.636a9 9 0 1 0 12.728 0M12 3v9"/></svg>`,
   alert: `<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126ZM12 15.75h.007v.008H12v-.008Z"/></svg>`,
-  wifi: `<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M8.288 15.038a5.25 5.25 0 0 1 7.424 0M5.106 11.856c3.807-3.808 9.98-3.808 13.788 0M1.924 8.674c5.565-5.565 14.587-5.565 20.152 0M12.53 18.22l-.53.53-.53-.53a.75.75 0 0 1 1.06 0Z"/></svg>`,
-  wifioff: `<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m0 .008v.015m0 0v.008M12.53 18.22l-.53.53-.53-.53M3 3l18 18M10.584 10.587a5.25 5.25 0 0 1 5.832 1.453m-9.83-3.412C2.374 11.763 1.718 14.97 3.106 17.856M1.924 8.674a14.25 14.25 0 0 1 4.432-3.23"/></svg>`,
+  connect: `<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M13.19 8.688a4.5 4.5 0 0 1 1.242 7.244l-4.5 4.5a4.5 4.5 0 0 1-6.364-6.364l1.757-1.757m13.35-.622 1.757-1.757a4.5 4.5 0 0 0-6.364-6.364l-4.5 4.5a4.5 4.5 0 0 0 1.242 7.244"/></svg>`,
+  chart: `<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M3 13.125C3 12.504 3.504 12 4.125 12h2.25c.621 0 1.125.504 1.125 1.125v6.75C7.5 20.496 6.996 21 6.375 21h-2.25A1.125 1.125 0 0 1 3 19.875v-6.75ZM9.75 8.625c0-.621.504-1.125 1.125-1.125h2.25c.621 0 1.125.504 1.125 1.125v11.25c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 0 1-1.125-1.125V8.625ZM16.5 4.125c0-.621.504-1.125 1.125-1.125h2.25C20.496 3 21 3.504 21 4.125v15.75c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 0 1-1.125-1.125V4.125Z"/></svg>`,
   menu: `<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M3.75 6.75h16.5M3.75 12h16.5m-16.5 5.25h16.5"/></svg>`,
   logout: `<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M15.75 9V5.25A2.25 2.25 0 0 0 13.5 3h-6a2.25 2.25 0 0 0-2.25 2.25v13.5A2.25 2.25 0 0 0 7.5 21h6a2.25 2.25 0 0 0 2.25-2.25V15M12 9l-3 3m0 0 3 3m-3-3h12.75"/></svg>`,
   valve: `<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M9.594 3.94c.09-.542.56-.94 1.11-.94h2.593c.55 0 1.02.398 1.11.94l.213 1.281c.063.374.313.686.645.87.074.04.147.083.22.127.325.196.72.257 1.075.124l1.217-.456a1.125 1.125 0 0 1 1.37.49l1.296 2.247a1.125 1.125 0 0 1-.26 1.431l-1.003.827c-.293.241-.438.613-.43.992a7.723 7.723 0 0 1 0 .255c-.008.378.137.75.43.991l1.004.827c.424.35.534.955.26 1.43l-1.298 2.247a1.125 1.125 0 0 1-1.369.491l-1.217-.456c-.355-.133-.75-.072-1.076.124a6.47 6.47 0 0 1-.22.128c-.331.183-.581.495-.644.869l-.213 1.281c-.09.543-.56.94-1.11.94h-2.594c-.55 0-1.019-.398-1.11-.94l-.213-1.281c-.062-.374-.312-.686-.644-.87a6.52 6.52 0 0 1-.22-.127c-.325-.196-.72-.257-1.076-.124l-1.217.456a1.125 1.125 0 0 1-1.369-.49l-1.297-2.247a1.125 1.125 0 0 1 .26-1.431l1.004-.827c.292-.24.437-.613.43-.991a6.932 6.932 0 0 1 0-.255c.007-.38-.138-.751-.43-.992l-1.004-.827a1.125 1.125 0 0 1-.26-1.43l1.297-2.247a1.125 1.125 0 0 1 1.37-.491l1.216.456c.356.133.751.072 1.076-.124.072-.044.146-.086.22-.128.332-.183.582-.495.644-.869l.214-1.28Z"/><path stroke-linecap="round" stroke-linejoin="round" d="M15 12a3 3 0 1 1-6 0 3 3 0 0 1 6 0Z"/></svg>`,
-  check: `<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="m4.5 12.75 6 6 9-13.5"/></svg>`,
-  xmark: `<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18 18 6M6 6l12 12"/></svg>`,
   refresh: `<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0 3.181 3.183a8.25 8.25 0 0 0 13.803-3.7M4.031 9.865a8.25 8.25 0 0 1 13.803-3.7l3.181 3.182m0-4.991v4.99"/></svg>`,
-  connect: `<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M13.19 8.688a4.5 4.5 0 0 1 1.242 7.244l-4.5 4.5a4.5 4.5 0 0 1-6.364-6.364l1.757-1.757m13.35-.622 1.757-1.757a4.5 4.5 0 0 0-6.364-6.364l-4.5 4.5a4.5 4.5 0 0 0 1.242 7.244"/></svg>`,
-  chart: `<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M3 13.125C3 12.504 3.504 12 4.125 12h2.25c.621 0 1.125.504 1.125 1.125v6.75C7.5 20.496 6.996 21 6.375 21h-2.25A1.125 1.125 0 0 1 3 19.875v-6.75ZM9.75 8.625c0-.621.504-1.125 1.125-1.125h2.25c.621 0 1.125.504 1.125 1.125v11.25c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 0 1-1.125-1.125V8.625ZM16.5 4.125c0-.621.504-1.125 1.125-1.125h2.25C20.496 3 21 3.504 21 4.125v15.75c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 0 1-1.125-1.125V4.125Z"/></svg>`,
 };
 
 // ---- Build the dashboard HTML ----
@@ -70,20 +65,20 @@ export function renderDashboard(container, onLogout) {
           ${icons.chart} Live History
         </button>
 
-        <div class="sidebar__section-label">System</div>
+        <div class="sidebar__section-label">Hardware Link</div>
         <button class="sidebar__nav-item" data-section="connection">
-          ${icons.wifi} ESP32 Connection
+          ${icons.connect} USB Connection
         </button>
       </nav>
 
       <div class="sidebar__footer">
         <div class="sidebar__connection">
-          <div class="sidebar__connection-label">Device Status</div>
+          <div class="sidebar__connection-label">Port Status</div>
           <div class="connection-status" id="sidebar-status">
             <span class="status-dot disconnected"></span>
             <span>DISCONNECTED</span>
           </div>
-          <div class="sidebar__ip" id="sidebar-ip">—</div>
+          <div class="sidebar__ip" id="sidebar-ip">USB SERIAL (115200)</div>
         </div>
         <button class="btn-logout" id="btn-logout">
           ${icons.logout} LOGOUT
@@ -101,7 +96,7 @@ export function renderDashboard(container, onLogout) {
         <button class="topbar-hamburger" id="topbar-hamburger">${icons.menu}</button>
         <div class="topbar-title">
           <h1>GOBARDHAN CONTROL CENTER</h1>
-          <p id="topbar-subtitle">Smart Biogas Monitoring &amp; Slurry Management</p>
+          <p id="topbar-subtitle">Continuous Real-Time Biogas Monitoring (Direct USB Port Mode)</p>
         </div>
         <span class="topbar-time" id="topbar-clock">--:--:--</span>
       </header>
@@ -114,8 +109,8 @@ export function renderDashboard(container, onLogout) {
           <div class="connection-panel">
             <div class="connection-panel__header">
               <div>
-                <div class="connection-panel__title">ESP32 Device Connection</div>
-                <div class="connection-panel__desc">Enter your ESP32 IP address to connect</div>
+                <div class="connection-panel__title">ESP32 USB Serial Direct Connection</div>
+                <div class="connection-panel__desc">High-speed hardware connection at 115200 baud — Zero latency, continuous live telemetry, no Wi-Fi required</div>
               </div>
               <span class="connection-status-badge disconnected" id="conn-badge">
                 <span class="loading-spinner hidden" id="conn-spinner"></span>
@@ -123,58 +118,56 @@ export function renderDashboard(container, onLogout) {
               </span>
             </div>
 
-            <div class="connection-form" style="display:flex; flex-direction:column; gap:10px;">
-              <button class="btn-connect" id="btn-connect-port">
-                ${icons.connect} CONNECT VIA PORT (PRIMARY)
+            <div class="connection-form" style="display:flex; flex-direction:column; gap:12px;">
+              <button class="btn-connect" id="btn-connect-port" style="padding:14px 20px; font-size:1rem; font-weight:700; letter-spacing:0.5px;">
+                ${icons.connect} CLICK TO CONNECT ESP32 (USB PORT)
               </button>
-              <div style="display:flex; gap:10px;">
-                <input
-                  type="text"
-                  class="form-input"
-                  id="esp32-ip-input"
-                  placeholder="192.168.1.100"
-                  value=""
-                  autocomplete="off"
-                  spellcheck="false"
-                  style="flex:1;"
-                />
-                <button class="btn-connect btn-secondary" id="btn-connect-ip">
-                  CONNECT VIA IP
-                </button>
-              </div>
-              <button class="btn-danger hidden" id="btn-disconnect" style="margin-top:10px;">
-                DISCONNECT ESP32
+              <button class="btn-danger hidden" id="btn-disconnect" style="padding:12px 20px;">
+                ${icons.power} DISCONNECT USB PORT
               </button>
             </div>
 
-            <div class="connection-info-grid" id="conn-info-grid">
+            <!-- Helpful Tips for Smooth Serial Operation -->
+            <div style="margin-top:14px; padding:12px 16px; background:rgba(22, 163, 74, 0.08); border-left:4px solid #16a34a; border-radius:6px; font-size:0.85rem; line-height:1.5; color:var(--clr-gray-700);">
+              <strong style="color:#166534; display:block; margin-bottom:4px;">⚡ Real-Time Testing Instructions:</strong>
+              <ul style="margin:4px 0 0 18px; padding:0;">
+                <li><strong>Close Arduino IDE Serial Monitor:</strong> Windows only permits one program to access the COM port at a time.</li>
+                <li><strong>Web Serial Browser:</strong> Use <strong>Google Chrome</strong> or <strong>Microsoft Edge</strong>.</li>
+                <li><strong>Continuous Stream:</strong> The ESP32 streams sensor telemetry every 1.5s. All cards and charts update automatically.</li>
+              </ul>
+            </div>
+
+            <div class="connection-info-grid" id="conn-info-grid" style="margin-top:14px;">
               <div class="connection-info-item">
-                <label>IP Address</label>
-                <span id="ci-ip">—</span>
+                <label>Interface</label>
+                <span id="ci-mode">USB Serial (Web Serial API)</span>
               </div>
               <div class="connection-info-item">
-                <label>Data Status</label>
-                <span id="ci-status">Idle</span>
+                <label>Baud Rate</label>
+                <span id="ci-baud">115200 Baud</span>
               </div>
               <div class="connection-info-item">
-                <label>Last Update</label>
+                <label>Stream Status</label>
+                <span id="ci-status">Idle (Disconnected)</span>
+              </div>
+              <div class="connection-info-item">
+                <label>Last Packet</label>
                 <span id="ci-last-update">—</span>
               </div>
               <div class="connection-info-item">
-                <label>Poll Interval</label>
-                <span id="ci-interval">3s</span>
+                <label>Packets Received</label>
+                <span id="ci-packet-count">0</span>
               </div>
             </div>
 
             <div class="connection-error hidden" id="conn-error">
-              <div class="connection-error__title">⚠ ESP32 Connection Failed</div>
-              <ul>
-                <li>Ensure ESP32 is powered on</li>
-                <li>Confirm both devices are on the same Wi-Fi network</li>
-                <li>Verify the IP address is correct</li>
-                <li>Check the browser console for CORS errors</li>
+              <div class="connection-error__title">⚠ Could Not Open Port</div>
+              <ul style="margin:6px 0 0 18px;">
+                <li><strong>Is Arduino IDE Serial Monitor open?</strong> Close it and click Retry below.</li>
+                <li><strong>USB Cable:</strong> Ensure the micro-USB/Type-C cable is fully plugged in and supports data transfer.</li>
+                <li><strong>Browser Permissions:</strong> If prompted by Chrome, select your CP2102 / CH340 / USB-Serial device.</li>
               </ul>
-              <button class="btn-retry" id="btn-retry">
+              <button class="btn-retry" id="btn-retry" style="margin-top:10px;">
                 ${icons.refresh} RETRY CONNECTION
               </button>
             </div>
@@ -186,7 +179,7 @@ export function renderDashboard(container, onLogout) {
           <div class="summary-card">
             <div class="summary-card__label">ESP32 Status</div>
             <div class="summary-card__value red" id="sum-status">OFFLINE</div>
-            <div class="summary-card__sub" id="sum-status-sub">Not connected</div>
+            <div class="summary-card__sub" id="sum-status-sub">USB Port not opened</div>
           </div>
           <div class="summary-card">
             <div class="summary-card__label">Slurry Level</div>
@@ -214,7 +207,7 @@ export function renderDashboard(container, onLogout) {
         <div class="section-title">
           ${icons.activity}
           Live Sensor Readings
-          <span class="data-age" id="data-age-label" style="margin-left:auto;"></span>
+          <span class="data-age" id="data-age-label" style="margin-left:auto;">Waiting for connection</span>
         </div>
         <section class="sensor-grid" id="section-sensors">
 
@@ -263,7 +256,7 @@ export function renderDashboard(container, onLogout) {
               <input type="number" id="drum-height-input" value="80" min="10" max="500" />
               <span>cm</span>
             </div>
-            <div class="sensor-card__source">HC-SR04 Ultrasonic</div>
+            <div class="sensor-card__source">HC-SR04 Ultrasonic (Trig: 5, Echo: 18)</div>
           </div>
 
           <!-- Methane Card -->
@@ -277,7 +270,7 @@ export function renderDashboard(container, onLogout) {
               <span class="sensor-card__value" id="methane-val">--</span>
               <span class="sensor-card__unit">ADC</span>
             </div>
-            <div class="sensor-card__source">MQ-4 Raw Value</div>
+            <div class="sensor-card__source">MQ-4 Gas Sensor (Analog Pin 34)</div>
           </div>
 
           <!-- Pressure Card -->
@@ -291,7 +284,7 @@ export function renderDashboard(container, onLogout) {
               <span class="sensor-card__value" id="pressure-val">--</span>
               <span class="sensor-card__unit">hPa</span>
             </div>
-            <div class="sensor-card__source">BMP180</div>
+            <div class="sensor-card__source">BMP180 Sensor (I2C SDA:21, SCL:22)</div>
           </div>
 
           <!-- Gas Production Estimate Card -->
@@ -306,7 +299,7 @@ export function renderDashboard(container, onLogout) {
               <span class="sensor-card__unit">hrs</span>
             </div>
             <div class="production-detail" id="gas-estimate-detail">Waiting for sensor data…</div>
-            <div class="sensor-card__source">Algorithm: temp + pressure + methane</div>
+            <div class="sensor-card__source">Algorithm: Temp + Pressure + Methane</div>
           </div>
 
           <!-- Slurry Temp Card -->
@@ -320,7 +313,7 @@ export function renderDashboard(container, onLogout) {
               <span class="sensor-card__value" id="slurry-temp-val">--</span>
               <span class="sensor-card__unit">°C</span>
             </div>
-            <div class="sensor-card__source">DS18B20</div>
+            <div class="sensor-card__source">DS18B20 Waterproof Probe (Pin 4)</div>
           </div>
 
           <!-- Atmosphere Card (combined) -->
@@ -332,7 +325,7 @@ export function renderDashboard(container, onLogout) {
             <div class="sensor-card__title">Atmospheric Conditions</div>
             <div class="climate-row">
               <div class="climate-item">
-                <div class="climate-item__label">Temperature</div>
+                <div class="climate-item__label">Outside Temp</div>
                 <div>
                   <span class="climate-item__value" id="outside-temp-val">--</span>
                   <span class="climate-item__unit">°C</span>
@@ -346,7 +339,7 @@ export function renderDashboard(container, onLogout) {
                 </div>
               </div>
             </div>
-            <div class="sensor-card__source">DHT11</div>
+            <div class="sensor-card__source">DHT11 Temp &amp; Humidity (Pin 19)</div>
           </div>
 
         </section>
@@ -362,8 +355,8 @@ export function renderDashboard(container, onLogout) {
             <div class="control-card__header">
               <div class="control-card__icon" id="stirrer-icon">${icons.wrench}</div>
               <div>
-                <div class="control-card__name">Stirrer / Mixer</div>
-                <div class="control-card__desc">Mixes the slurry in the digestion tank using a stepper-driven paddle.</div>
+                <div class="control-card__name">Stirrer / Mixer (Stepper)</div>
+                <div class="control-card__desc">Triggers Secondary Stepper ESP32 via GPIO 25/26 to mix digestion slurry.</div>
               </div>
             </div>
             <div class="control-card__state">
@@ -380,8 +373,8 @@ export function renderDashboard(container, onLogout) {
             <div class="control-card__header">
               <div class="control-card__icon" id="grinder-icon">${icons.wrench}</div>
               <div>
-                <div class="control-card__name">Input Grinder</div>
-                <div class="control-card__desc">Grinds incoming vegetable waste before feeding into the digestion system.</div>
+                <div class="control-card__name">Input Waste Grinder</div>
+                <div class="control-card__desc">Engages the high-power input shredder relay (GPIO 15) for vegetable feed.</div>
               </div>
             </div>
             <div class="control-card__state">
@@ -399,7 +392,7 @@ export function renderDashboard(container, onLogout) {
               <div class="control-card__icon" id="valve-icon">${icons.valve}</div>
               <div>
                 <div class="control-card__name">Outlet Gate Valve</div>
-                <div class="control-card__desc">Controls the outlet relay (GPIO 23). Confirmation required before operation.</div>
+                <div class="control-card__desc">Controls the digested slurry discharge relay (GPIO 23). Safety confirmation required.</div>
               </div>
             </div>
             <div class="valve-indicator">
@@ -415,13 +408,13 @@ export function renderDashboard(container, onLogout) {
 
         <!-- Live History Chart -->
         <div class="section-title">
-          ${icons.chart} Live Monitoring History
+          ${icons.chart} Live Telemetry History
         </div>
         <section class="charts-section" id="section-history">
           <div class="charts-header">
             <div>
               <div style="font-size:0.875rem;font-weight:700;color:var(--clr-gray-700)">Sensor Trends</div>
-              <div style="font-size:0.75rem;color:var(--clr-gray-400)">Last 30 readings (scaled for display)</div>
+              <div style="font-size:0.75rem;color:var(--clr-gray-400)">Real-time continuous readings streamed from ESP32</div>
             </div>
             <div class="charts-legend">
               <div class="legend-item"><span class="legend-dot" style="background:#166534"></span>Slurry Temp</div>
@@ -458,36 +451,49 @@ export function renderDashboard(container, onLogout) {
     </div>
   `;
 
-  // ---- Wire up events ----
+  // Wire events & init components
   _wireEvents(onLogout);
   _startClock();
   _initChart();
 
-  // Restore saved IP
-  const savedIp = api.getEsp32Ip();
-  if (savedIp) {
-    document.getElementById('esp32-ip-input').value = savedIp;
-  }
-
-  // Listen for connection state changes
+  // Register listeners with API
+  api.onData(_handleNewPacket);
   api.onConnectionChange(_onApiConnectionChange);
 }
 
-// ---- Clock ----
+// ---- Clock & Watchdog ----
 function _startClock() {
-  const el = document.getElementById('topbar-clock');
-  if (!el) return;
-  const tick = () => { el.textContent = formatTime(); };
+  const elClock = document.getElementById('topbar-clock');
+  const tick = () => {
+    if (elClock) elClock.textContent = formatTime();
+
+    // Stale data watchdog (runs every second)
+    if (api.isConnected()) {
+      const lastTime = api.getLastDataTime();
+      if (lastTime) {
+        const ageSec = Math.floor((Date.now() - lastTime) / 1000);
+        const ageLabel = document.getElementById('data-age-label');
+        if (ageLabel) {
+          ageLabel.textContent = ageSec <= 2 ? 'Live (Just now)' : `Updated ${ageSec}s ago`;
+        }
+
+        const sumSub = document.getElementById('sum-status-sub');
+        if (sumSub) {
+          sumSub.textContent = `Streaming • ${timeSince(lastTime)}`;
+        }
+      }
+    }
+  };
   tick();
-  setInterval(tick, 1000);
+  clockTimer = setInterval(tick, 1000);
 }
 
 // ---- Chart init ----
 function _initChart() {
   const canvas = document.getElementById('live-chart');
-  if (!canvas) return;
-  // Chart.js is loaded via CDN from main.js
-  initChart(canvas);
+  if (canvas) {
+    initChart(canvas);
+  }
 }
 
 // ---- Event wiring ----
@@ -510,7 +516,7 @@ function _wireEvents(onLogout) {
 
   // Logout
   document.getElementById('btn-logout')?.addEventListener('click', () => {
-    _stopPolling();
+    cleanupDashboard();
     destroyChart();
     onLogout();
   });
@@ -518,29 +524,11 @@ function _wireEvents(onLogout) {
   // Connect Port button
   document.getElementById('btn-connect-port')?.addEventListener('click', _doConnectPort);
 
-  // Connect IP button
-  document.getElementById('btn-connect-ip')?.addEventListener('click', () => {
-    const ip = document.getElementById('esp32-ip-input')?.value.trim();
-    _doConnectIp(ip);
-  });
-
   // Disconnect button
   document.getElementById('btn-disconnect')?.addEventListener('click', _doDisconnect);
 
   // Retry button
-  document.getElementById('btn-retry')?.addEventListener('click', () => {
-    const mode = api.getCommMode();
-    if (mode === 'PORT') _doConnectPort();
-    else {
-      const ip = document.getElementById('esp32-ip-input')?.value.trim();
-      _doConnectIp(ip);
-    }
-  });
-
-  // Enter key in IP input
-  document.getElementById('esp32-ip-input')?.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') document.getElementById('btn-connect-ip')?.click();
-  });
+  document.getElementById('btn-retry')?.addEventListener('click', _doConnectPort);
 
   // Drum height config
   document.getElementById('drum-height-input')?.addEventListener('change', (e) => {
@@ -551,13 +539,9 @@ function _wireEvents(onLogout) {
     }
   });
 
-  // Stirrer button
+  // Actuator buttons
   document.getElementById('btn-stirrer')?.addEventListener('click', _handleStirrer);
-
-  // Grinder button
   document.getElementById('btn-grinder')?.addEventListener('click', _handleGrinder);
-
-  // Outlet button (requires confirmation)
   document.getElementById('btn-outlet')?.addEventListener('click', _handleOutletRequest);
 
   // Confirm modal
@@ -577,195 +561,167 @@ function _closeSidebar() {
   document.getElementById('sidebar-overlay')?.classList.remove('active');
 }
 
-// ---- Connect ----
+// ---- Connect / Disconnect ----
 async function _doConnectPort() {
-  _setConnectingState(true, 'PORT');
+  _setConnectingState(true);
   document.getElementById('conn-error')?.classList.add('hidden');
-
-  document.getElementById('ci-ip').textContent = 'Web Serial';
-  document.getElementById('sidebar-ip').textContent = 'SERIAL';
-  document.getElementById('ci-status').textContent = 'Requesting Port Access…';
+  document.getElementById('ci-status').textContent = 'Opening USB Port…';
 
   const success = await api.connectPort();
 
   _setConnectingState(false);
   if (success) {
-    showToast('ESP32 connected successfully via PORT!', 'success');
-    document.getElementById('ci-status').textContent = 'Port Connected';
-    _startPolling();
+    showToast('ESP32 connected via USB Serial!', 'success');
+    document.getElementById('ci-status').textContent = 'Waiting for telemetry stream…';
   } else {
     document.getElementById('conn-error')?.classList.remove('hidden');
-    showToast('Could not open Serial Port.', 'error');
-  }
-}
-
-async function _doConnectIp(ip) {
-  if (!ip) {
-    showToast('Please enter an IP address.', 'error');
-    return;
-  }
-  _setConnectingState(true, 'IP');
-  document.getElementById('conn-error')?.classList.add('hidden');
-
-  document.getElementById('ci-status').textContent = 'Waiting for Connection…';
-
-  const success = await api.testConnection(ip);
-
-  _setConnectingState(false);
-  if (success) {
-    document.getElementById('ci-ip').textContent = ip;
-    document.getElementById('sidebar-ip').textContent = ip;
-    showToast('ESP32 connected successfully via IP!', 'success');
-    _startPolling();
-  } else {
-    document.getElementById('conn-error')?.classList.remove('hidden');
-    showToast('Could not reach ESP32. Check IP and network.', 'error');
+    showToast('Could not open Serial Port. Close Arduino Monitor & retry.', 'error');
   }
 }
 
 async function _doDisconnect() {
   await api.disconnectPort();
-  _stopPolling();
   _setConnectingState(false);
-
-  document.getElementById('ci-ip').textContent = '—';
-  document.getElementById('sidebar-ip').textContent = '—';
-  document.getElementById('ci-status').textContent = 'Idle';
-  document.getElementById('conn-badge').className = 'connection-status-badge disconnected';
-  document.getElementById('conn-badge').innerHTML = 'DISCONNECTED';
+  showToast('ESP32 disconnected.', 'warning');
 }
 
-function _setConnectingState(connecting, mode = null) {
+function _setConnectingState(connecting) {
   const badge = document.getElementById('conn-badge');
-  const btnPort = document.getElementById('btn-connect-port');
-  const btnIp = document.getElementById('btn-connect-ip');
-  const ipInput = document.getElementById('esp32-ip-input');
+  const btnConnect = document.getElementById('btn-connect-port');
+  const btnDisconnect = document.getElementById('btn-disconnect');
 
   if (connecting) {
-    badge?.classList.remove('connected', 'disconnected');
-    badge?.classList.add('connecting');
-    if (badge) badge.innerHTML = `<span class="loading-spinner"></span> CONNECTING…`;
-    if (btnPort) btnPort.disabled = true;
-    if (btnIp) btnIp.disabled = true;
-    if (ipInput) ipInput.disabled = true;
+    if (badge) {
+      badge.className = 'connection-status-badge connecting';
+      badge.innerHTML = `<span class="loading-spinner"></span> OPENING PORT…`;
+    }
+    if (btnConnect) btnConnect.disabled = true;
   } else {
-    if (btnPort) btnPort.disabled = false;
-    if (btnIp) btnIp.disabled = false;
-    if (ipInput) ipInput.disabled = false;
+    if (btnConnect) btnConnect.disabled = false;
   }
 
   if (api.isConnected()) {
-    document.getElementById('btn-disconnect')?.classList.remove('hidden');
-    if (btnPort) btnPort.classList.add('hidden');
-    if (btnIp) btnIp.parentElement.classList.add('hidden');
+    btnConnect?.classList.add('hidden');
+    btnDisconnect?.classList.remove('hidden');
   } else {
-    document.getElementById('btn-disconnect')?.classList.add('hidden');
-    if (btnPort) btnPort.classList.remove('hidden');
-    if (btnIp) btnIp.parentElement.classList.remove('hidden');
+    btnConnect?.classList.remove('hidden');
+    btnDisconnect?.classList.add('hidden');
   }
 }
 
-// ---- Polling ----
-function _startPolling() {
-  _stopPolling();
-  _poll();
-  pollTimer = setInterval(_poll, POLL_INTERVAL_MS);
+// ---- Event-Driven Data Handler ----
+function _handleNewPacket(data) {
+  sensorData = data;
+  _updateUI(data);
+
+  // Update telemetry packet stats
+  const countEl = document.getElementById('ci-packet-count');
+  if (countEl) countEl.textContent = String(api.getPacketCount());
+
+  const lastUpdate = api.getLastDataTime();
+  const lastUpdateEl = document.getElementById('ci-last-update');
+  if (lastUpdateEl) lastUpdateEl.textContent = lastUpdate ? formatTime(new Date(lastUpdate)) : '—';
+
+  const statusEl = document.getElementById('ci-status');
+  if (statusEl) statusEl.textContent = 'Live Streaming (Receiving Packets)';
 }
 
-function _stopPolling() {
-  if (pollTimer) {
-    clearInterval(pollTimer);
-    pollTimer = null;
-  }
-}
-
-async function _poll() {
-  try {
-    const raw = await api.fetchSensorData();
-    sensorData = raw;
-    _updateUI(raw);
-  } catch {
-    api.markDisconnected();
-    _onLostConnection();
-  }
-}
-
-// ---- Connection state changes ----
-function _onApiConnectionChange(connected) {
-  _updateConnectionBadge(connected);
-  _updateSidebarStatus(connected);
-}
-
-function _updateConnectionBadge(connected) {
+// ---- Connection State Changes ----
+function _onApiConnectionChange(connected, error) {
   const badge = document.getElementById('conn-badge');
-  if (!badge) return;
-  badge.className = `connection-status-badge ${connected ? 'connected' : 'disconnected'}`;
-  badge.innerHTML = connected ? `${icons.wifi} CONNECTED` : `${icons.wifioff} DISCONNECTED`;
-  document.getElementById('ci-status').textContent = connected ? 'Receiving' : 'Lost';
-}
-
-function _updateSidebarStatus(connected) {
-  const el = document.getElementById('sidebar-status');
-  if (!el) return;
-  el.innerHTML = connected
-    ? `<span class="status-dot connected"></span><span>CONNECTED</span>`
-    : `<span class="status-dot disconnected"></span><span>DISCONNECTED</span>`;
-}
-
-function _onLostConnection() {
-  document.getElementById('ci-status').textContent = 'Lost';
-  document.getElementById('conn-error')?.classList.remove('hidden');
-
-  // Summary
+  const sideStatus = document.getElementById('sidebar-status');
   const sumStatus = document.getElementById('sum-status');
-  if (sumStatus) { sumStatus.textContent = 'OFFLINE'; sumStatus.className = 'summary-card__value red'; }
-  document.getElementById('sum-status-sub').textContent = timeSince(api.getLastDataTime());
+  const sumStatusSub = document.getElementById('sum-status-sub');
+  const btnConnect = document.getElementById('btn-connect-port');
+  const btnDisconnect = document.getElementById('btn-disconnect');
+
+  if (connected) {
+    if (badge) {
+      badge.className = 'connection-status-badge connected';
+      badge.innerHTML = `${icons.connect} CONNECTED (USB)`;
+    }
+    if (sideStatus) {
+      sideStatus.innerHTML = `<span class="status-dot connected"></span><span>ONLINE (USB)</span>`;
+    }
+    if (sumStatus) {
+      sumStatus.textContent = 'ONLINE';
+      sumStatus.className = 'summary-card__value green';
+    }
+    if (sumStatusSub) {
+      sumStatusSub.textContent = 'Port open (115200)';
+    }
+    btnConnect?.classList.add('hidden');
+    btnDisconnect?.classList.remove('hidden');
+    document.getElementById('conn-error')?.classList.add('hidden');
+  } else {
+    if (badge) {
+      badge.className = 'connection-status-badge disconnected';
+      badge.innerHTML = 'DISCONNECTED';
+    }
+    if (sideStatus) {
+      sideStatus.innerHTML = `<span class="status-dot disconnected"></span><span>DISCONNECTED</span>`;
+    }
+    if (sumStatus) {
+      sumStatus.textContent = 'OFFLINE';
+      sumStatus.className = 'summary-card__value red';
+    }
+    if (sumStatusSub) {
+      sumStatusSub.textContent = error ? `Error: ${error}` : 'USB Port closed';
+    }
+    btnConnect?.classList.remove('hidden');
+    btnDisconnect?.classList.add('hidden');
+    document.getElementById('ci-status').textContent = 'Disconnected';
+  }
 }
 
-// ---- Update UI with sensor data ----
+// ---- Update UI with Sensor Data ----
 function _updateUI(data) {
   const fill = calcFillPercent(data.distance, drumHeight);
 
-  // — Summary bar —
-  const sumStatus = document.getElementById('sum-status');
-  if (sumStatus) { sumStatus.textContent = 'ONLINE'; sumStatus.className = 'summary-card__value green'; }
-  document.getElementById('sum-status-sub').textContent = timeSince(api.getLastDataTime());
-  document.getElementById('sum-level').textContent = `${fmt(fill)}%`;
-  document.getElementById('sum-level-sub').textContent = slurryStatus(fill).label;
-  document.getElementById('sum-methane').textContent = fmt(data.methane, 0);
-  document.getElementById('sum-pressure').textContent = fmt(data.pressure);
+  // Summary Cards
+  const sumLevel = document.getElementById('sum-level');
+  if (sumLevel) sumLevel.textContent = `${fmt(fill)}%`;
+  const sumLevelSub = document.getElementById('sum-level-sub');
+  if (sumLevelSub) sumLevelSub.textContent = slurryStatus(fill).label;
 
-  // — Last update label —
-  const lastUpdate = api.getLastDataTime();
-  document.getElementById('ci-last-update').textContent = lastUpdate ? formatTime(new Date(lastUpdate)) : '—';
-  const ageLabel = document.getElementById('data-age-label');
-  if (ageLabel) ageLabel.textContent = `Updated ${timeSince(lastUpdate)}`;
+  const sumMethane = document.getElementById('sum-methane');
+  if (sumMethane) sumMethane.textContent = fmt(data.methane, 0);
 
-  // — Slurry card —
+  const sumPressure = document.getElementById('sum-pressure');
+  if (sumPressure) sumPressure.textContent = fmt(data.pressure);
+
+  // Slurry Tank Level Card
   const slurrySt = slurryStatus(fill);
   _setCardStatus('card-slurry', slurrySt.cls);
   _setBadge('slurry-badge', slurrySt.label, slurrySt.cls);
   document.getElementById('slurry-pct').textContent = fmt(fill);
   document.getElementById('slurry-dist').textContent = fmt(data.distance);
   document.getElementById('fill-pct-label').textContent = `${fmt(fill)}%`;
+
   const fillBar = document.getElementById('fill-bar');
   const tankFill = document.getElementById('tank-fill');
-  if (fillBar) { fillBar.style.width = `${fill}%`; fillBar.className = `fill-progress__fill ${_fillClass(fill)}`; }
-  if (tankFill) { tankFill.style.height = `${fill}%`; tankFill.className = `tank-fill ${_fillClass(fill)}`; }
+  if (fillBar) {
+    fillBar.style.width = `${fill}%`;
+    fillBar.className = `fill-progress__fill ${_fillClass(fill)}`;
+  }
+  if (tankFill) {
+    tankFill.style.height = `${fill}%`;
+    tankFill.className = `tank-fill ${_fillClass(fill)}`;
+  }
 
-  // — Methane card —
+  // Methane Card
   const methSt = methanStatus(data.methane);
   _setCardStatus('card-methane', methSt.cls);
   _setBadge('methane-badge', methSt.label, methSt.cls);
   document.getElementById('methane-val').textContent = fmt(data.methane, 0);
 
-  // — Pressure card —
+  // Pressure Card
   const preSt = pressureStatus(data.pressure);
   _setCardStatus('card-pressure', preSt.cls);
   _setBadge('pressure-badge', preSt.label, preSt.cls);
   document.getElementById('pressure-val').textContent = fmt(data.pressure);
 
-  // — Gas production estimate —
+  // Gas Production Estimate Card
   const gasEstimate = estimateGasProductionHours({
     methane: data.methane,
     pressure: data.pressure,
@@ -777,28 +733,28 @@ function _updateUI(data) {
   document.getElementById('gas-estimate-val').textContent = `${gasEstimate.hours}`;
   document.getElementById('gas-estimate-detail').textContent = `${gasEstimate.score}% efficiency • ${gasEstimate.detail}`;
 
-  // — Slurry temperature —
+  // Slurry Temperature Card
   const slTempSt = tempStatus(data.slurryTemp);
   _setCardStatus('card-slurry-temp', slTempSt.cls);
   _setBadge('slurry-temp-badge', slTempSt.label, slTempSt.cls);
   document.getElementById('slurry-temp-val').textContent = fmt(data.slurryTemp);
 
-  // — Atmosphere —
+  // Atmospheric Conditions Card
   const tempSt = tempStatus(data.outsideTemp);
   _setCardStatus('card-climate', tempSt.cls);
   _setBadge('climate-badge', tempSt.label, tempSt.cls);
   document.getElementById('outside-temp-val').textContent = fmt(data.outsideTemp);
   document.getElementById('humidity-val').textContent = fmt(data.humidity, 0);
 
-  // — Controls sync from ESP state —
+  // Synchronize Actuators with ESP32 feedback
   _syncControlState('stirrer', data.stirrer);
   _syncControlState('grinder', data.grinder);
   _syncValveState(data.outlet);
 
-  // — Alerts —
+  // Dynamic Safety Alerts
   _updateAlerts(data, fill);
 
-  // — Chart —
+  // Live Chart Push
   pushDataPoint(data, fill);
 }
 
@@ -823,16 +779,16 @@ function _setBadge(badgeId, label, cls) {
   badge.className = `sensor-card__status-badge ${cls}`;
 }
 
-// ---- Control sync ----
+// ---- Control State Synchronization ----
 function _syncControlState(type, running) {
   const dot = document.getElementById(`${type}-dot`);
   const state = document.getElementById(`${type}-state`);
   const btn = document.getElementById(`btn-${type}`);
   const icon = document.getElementById(`${type}-icon`);
 
-  if (dot) { dot.className = `status-dot ${running ? 'connected' : 'disconnected'}`; }
-  if (state) { state.textContent = running ? 'RUNNING' : 'STOPPED'; }
-  if (icon) { icon.className = `control-card__icon ${running ? 'running' : ''}`; }
+  if (dot) dot.className = `status-dot ${running ? 'connected' : 'disconnected'}`;
+  if (state) state.textContent = running ? 'RUNNING' : 'STOPPED';
+  if (icon) icon.className = `control-card__icon ${running ? 'running' : ''}`;
 
   if (btn) {
     if (running) {
@@ -853,9 +809,12 @@ function _syncValveState(open) {
   const btn = document.getElementById('btn-outlet');
   const icon = document.getElementById('valve-icon');
 
-  if (flow) { flow.className = `valve-flow ${open ? 'active' : ''}`; }
-  if (label) { label.textContent = open ? 'OPEN' : 'CLOSED'; label.className = `valve-label ${open ? 'open' : 'closed'}`; }
-  if (icon) { icon.className = `control-card__icon ${open ? 'valve-open' : ''}`; }
+  if (flow) flow.className = `valve-flow ${open ? 'active' : ''}`;
+  if (label) {
+    label.textContent = open ? 'OPEN' : 'CLOSED';
+    label.className = `valve-label ${open ? 'open' : 'closed'}`;
+  }
+  if (icon) icon.className = `control-card__icon ${open ? 'valve-open' : ''}`;
 
   if (btn) {
     if (open) {
@@ -870,9 +829,9 @@ function _syncValveState(open) {
   }
 }
 
-// ---- Control handlers ----
+// ---- Control Action Handlers ----
 async function _handleStirrer() {
-  if (!api.isConnected()) { showToast('ESP32 not connected.', 'error'); return; }
+  if (!api.isConnected()) { showToast('Connect USB Port first.', 'error'); return; }
   const btn = document.getElementById('btn-stirrer');
   const running = btn?.dataset.running === '1';
   btn.disabled = true;
@@ -893,7 +852,7 @@ async function _handleStirrer() {
 }
 
 async function _handleGrinder() {
-  if (!api.isConnected()) { showToast('ESP32 not connected.', 'error'); return; }
+  if (!api.isConnected()) { showToast('Connect USB Port first.', 'error'); return; }
   const btn = document.getElementById('btn-grinder');
   const running = btn?.dataset.running === '1';
   btn.disabled = true;
@@ -916,15 +875,15 @@ async function _handleGrinder() {
 let _pendingValveAction = null;
 
 function _handleOutletRequest() {
-  if (!api.isConnected()) { showToast('ESP32 not connected.', 'error'); return; }
+  if (!api.isConnected()) { showToast('Connect USB Port first.', 'error'); return; }
   const btn = document.getElementById('btn-outlet');
   const open = btn?.dataset.open === '1';
 
   const modal = document.getElementById('confirm-modal');
   document.getElementById('confirm-title').textContent = open ? 'Close Outlet Valve?' : 'Open Outlet Valve?';
   document.getElementById('confirm-desc').textContent = open
-    ? 'This will close the outlet gate valve (relay OFF). Slurry flow will stop.'
-    : 'This will open the outlet gate valve (relay ON). Slurry will flow out. Confirm only if safe to do so.';
+    ? 'This will close the outlet gate valve (GPIO 23 relay OFF). Slurry flow will stop.'
+    : 'This will open the outlet gate valve (GPIO 23 relay ON). Slurry will flow out.';
 
   const confirmBtn = document.getElementById('confirm-ok');
   confirmBtn.textContent = open ? 'CONFIRM CLOSE' : 'CONFIRM OPEN';
@@ -932,7 +891,6 @@ function _handleOutletRequest() {
   _pendingValveAction = open ? 'close' : 'open';
   modal?.classList.remove('hidden');
 
-  // Wire confirm
   confirmBtn.onclick = _doValveAction;
 }
 
@@ -962,26 +920,23 @@ function _closeConfirm() {
   document.getElementById('confirm-modal')?.classList.add('hidden');
 }
 
-// ---- Alerts ----
+// ---- Safety Alerts ----
 function _updateAlerts(data, fill) {
   const section = document.getElementById('alert-section');
   if (!section) return;
   const alerts = [];
 
-  if (!api.isConnected()) {
-    alerts.push({ type: 'danger', title: 'ESP32 CONNECTION LOST', desc: 'Live sensor data unavailable. Retrying…' });
-  }
   const methSt = methanStatus(data.methane);
-  if (methSt.cls === 'warning') alerts.push({ type: 'warning', title: '⚠ HIGH METHANE LEVEL', desc: 'Methane is elevated. Check the biogas system for leaks.' });
-  if (methSt.cls === 'danger') alerts.push({ type: 'danger', title: '⚠ CRITICAL METHANE', desc: 'Methane level is dangerously high! Evacuate and ventilate immediately.' });
+  if (methSt.cls === 'warning') alerts.push({ type: 'warning', title: '⚠ HIGH METHANE LEVEL', desc: 'Methane is elevated. Check system ventilation.' });
+  if (methSt.cls === 'danger') alerts.push({ type: 'danger', title: '⚠ CRITICAL METHANE', desc: 'Methane level is dangerously high! Ventilate area immediately.' });
 
   const preSt = pressureStatus(data.pressure);
-  if (preSt.cls === 'danger') alerts.push({ type: 'danger', title: '⚠ HIGH DRUM PRESSURE', desc: 'Drum pressure is above safe threshold. Check pressure relief immediately.' });
+  if (preSt.cls === 'danger') alerts.push({ type: 'danger', title: '⚠ HIGH DRUM PRESSURE', desc: 'Drum pressure is above safe threshold. Check relief valve.' });
   if (preSt.cls === 'warning' && data.pressure < 950) alerts.push({ type: 'warning', title: '⚠ LOW PRESSURE', desc: 'Pressure reading is unusually low.' });
 
   const slurrySt = slurryStatus(fill);
-  if (slurrySt.cls === 'warning') alerts.push({ type: 'warning', title: '⚠ SLURRY LEVEL HIGH', desc: `Tank is at ${fmt(fill)}%. Approaching maximum capacity. Consider draining.` });
-  if (slurrySt.cls === 'danger') alerts.push({ type: 'danger', title: '⚠ TANK NEAR FULL / FULL', desc: `Slurry is at ${fmt(fill)}%. Drain immediately to prevent overflow.` });
+  if (slurrySt.cls === 'warning') alerts.push({ type: 'warning', title: '⚠ SLURRY LEVEL HIGH', desc: `Tank is at ${fmt(fill)}%. Approaching maximum capacity.` });
+  if (slurrySt.cls === 'danger') alerts.push({ type: 'danger', title: '⚠ TANK NEAR FULL / FULL', desc: `Slurry is at ${fmt(fill)}%. Drain via outlet valve.` });
 
   section.innerHTML = alerts.map(a => `
     <div class="alert-banner ${a.type}">
@@ -996,6 +951,11 @@ function _updateAlerts(data, fill) {
 
 // ---- Cleanup on logout ----
 export function cleanupDashboard() {
-  _stopPolling();
-  api.onConnectionChange(null);
+  if (clockTimer) {
+    clearInterval(clockTimer);
+    clockTimer = null;
+  }
+  api.offData(_handleNewPacket);
+  api.offConnectionChange(_onApiConnectionChange);
+  api.disconnectPort().catch(() => {});
 }

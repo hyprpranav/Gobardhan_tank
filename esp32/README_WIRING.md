@@ -8,13 +8,13 @@ This document describes the dual-ESP32 architecture for GobarDhan v3.0, separati
 
 ```
  [ Web Browser / Dashboard ]
-             │ (Wi-Fi HTTP API)
+             │ (USB Web Serial API @ 115200 Baud)
              ▼
  ┌────────────────────────────────────────────────────────┐
  │                   MASTER ESP32                         │
  │  (Firmware: esp32/gobardhan_esp32.ino)                 │
  │                                                        │
- │  • Wi-Fi WebServer & REST API (/api/data, etc.)        │
+ │  • High-Speed USB Serial Direct Telemetry (115200)     │
  │  • Ultrasonic HC-SR04 (Trig: 5, Echo: 18)             │
  │  • MQ-4 Methane Sensor (Pin 34 - ADC1)                 │
  │  • BMP180 Pressure Sensor (I2C: SDA 21, SCL 22)        │
@@ -95,18 +95,26 @@ This document describes the dual-ESP32 architecture for GobarDhan v3.0, separati
 
 ---
 
-## 4. How to Test & Verify Voltage Instantly
+## 4. How to Test & Verify Telemetry & Actuators
 
-### Direct Browser Test (Bypasses Dashboard to verify hardware):
-1. Find your Master ESP32's IP Address in the Arduino Serial Monitor (e.g. `192.168.1.105`).
-2. In your browser address bar on your phone or PC (connected to the same Wi-Fi), open:
-   - **Turn ON Stirrer**: `http://192.168.1.105/api/stirrer/on`
-     - You will see JSON: `{"ok":true,"stirrer":true,"pin_25":"HIGH","voltage":"3.3V"}`
-     - The **Onboard Blue LED on Master ESP32 will turn ON**.
-     - Multimeter on **GPIO 25** or **GPIO 26** will measure **3.3V DC**.
-     - Secondary ESP32 will light its **Blue LED** and start rotating the motor continuously!
-   - **Turn OFF Stirrer**: `http://192.168.1.105/api/stirrer/off`
-     - You will see JSON: `{"ok":true,"stirrer":false,"pin_25":"LOW","voltage":"0V"}`
-     - The **Blue LEDs will turn OFF**.
-     - Multimeter will measure **0.0V DC**.
-     - Motor immediately stops with coils de-energized.
+### USB Port Testing Guide:
+1. Upload `esp32/gobardhan_esp32.ino` to the Master ESP32 via Arduino IDE.
+2. **IMPORTANT:** Close the Arduino IDE Serial Monitor so the COM port is free.
+3. Open the GobarDhan Web Dashboard in Google Chrome or Microsoft Edge.
+4. Click **"CLICK TO CONNECT ESP32 (USB PORT)"** and select your ESP32's COM port.
+5. You will immediately see:
+   - Status badge turns green: **CONNECTED (USB)**
+   - All live sensor telemetry updates automatically every 1.5 seconds:
+     - Distance & Slurry Fill Level (%)
+     - Methane (ADC value)
+     - Drum Pressure (hPa)
+     - Slurry Temperature (°C)
+     - Outside Temperature (°C) & Humidity (%)
+     - Real-time Chart trends
+6. Click **TURN ON STIRRER**:
+   - Master ESP32 sets Pin 25 & 26 HIGH (3.3V).
+   - Blue LED lights up on Master ESP32.
+   - Secondary ESP32 detects HIGH on Pin 13 and runs the L298N stepper motor continuously.
+7. Click **TURN OFF STIRRER**:
+   - Pin 25 & 26 drop to LOW (0V).
+   - Stepper motor stops immediately.

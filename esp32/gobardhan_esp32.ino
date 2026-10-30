@@ -1,14 +1,16 @@
 /*
  * ============================================================
  * GOBARDHAN — Smart Biogas Monitoring & Slurry Management
- * ESP32 Master Firmware — Lightweight HTTP API Server
+ * ESP32 Master Firmware — High-Speed USB Serial Direct Mode
+ * (No Wi-Fi — Ultra Low Power, Zero Latency, Continuous Run)
  * ============================================================
  *
  * Architecture:
- *   - Master ESP32: Manages Wi-Fi, HTTP API, Sensors, Grinder Relay,
- *                   Outlet Valve Relay, and Stepper Trigger Signal.
+ *   - Master ESP32: Reads all sensors, streams newline-delimited JSON
+ *                   over USB Serial at 115200 baud, controls Grinder
+ *                   and Outlet relays, and triggers Secondary Stepper ESP32.
  *   - Secondary ESP32: Drives L298N Stepper Motor independently
- *                   when Trigger Signal is HIGH (3.3V).
+ *                   when Trigger Signal (GPIO 25/26) is HIGH.
  *
  * GPIO Pin Map (Master ESP32):
  *   - HC-SR04 Ultrasonic: Trig=5, Echo=18
@@ -17,24 +19,24 @@
  *   - DHT11:              Pin 19
  *   - DS18B20:            Pin 4
  *   - Outlet Valve Relay: Pin 23
- *   - Grinder Relay:      Pin 15 (or 26/27 if wired to another pin)
- *   - Stepper Trigger:    Pin 25 (Mirrored on Pin 26 for flexibility)
+ *   - Grinder Relay:      Pin 15
+ *   - Stepper Trigger:    Pin 25 (Mirrored on Pin 26)
  *   - Status Onboard LED: Pin 2
  *
- * API Endpoints:
- *   GET /api/data          → JSON: sensor readings + actuator states
- *   GET /api/stirrer/on    → PIN 25 & 26 HIGH (3.3V) -> Triggers Stepper ESP32
- *   GET /api/stirrer/off   → PIN 25 & 26 LOW (0.0V)  -> Stops Stepper ESP32
- *   GET /api/grinder/on    → Enable grinder relay (PIN 15 ONLY — stepper NOT affected)
- *   GET /api/grinder/off   → Disable grinder relay (PIN 15 ONLY — stepper NOT affected)
- *   GET /api/outlet/open   → Open gate valve (relay ON)
- *   GET /api/outlet/close  → Close gate valve (relay OFF)
- *
+ * Serial Protocol (115200 baud):
+ *   - ESP32 outputs every 1.5s:
+ *     {"distance":58.2,"methane":186,"pressure":1003.4,"outsideTemp":32.5,"humidity":46,"slurryTemp":30.3,"stirrer":false,"grinder":false,"outlet":false}
+ *   - Browser sends commands:
+ *     {"cmd":"stirrerOn"}   -> Turns ON Stepper Trigger (PIN 25 & 26 HIGH)
+ *     {"cmd":"stirrerOff"}  -> Turns OFF Stepper Trigger (PIN 25 & 26 LOW)
+ *     {"cmd":"grinderOn"}   -> Turns ON Grinder Relay (PIN 15)
+ *     {"cmd":"grinderOff"}  -> Turns OFF Grinder Relay (PIN 15)
+ *     {"cmd":"outletOpen"}  -> Opens Outlet Gate Valve (PIN 23)
+ *     {"cmd":"outletClose"} -> Closes Outlet Gate Valve (PIN 23)
+ *     {"cmd":"getData"}     -> Immediately sends current sensor cache
  * ============================================================
  */
 
-#include <WiFi.h>
-#include <WebServer.h>
 #include <ArduinoJson.h>
 #include <Wire.h>
 #include <Adafruit_BMP085.h>    // BMP180 (uses BMP085 library)
@@ -43,33 +45,15 @@
 #include <DallasTemperature.h>
 
 // ============================================================
-// Wi-Fi Credentials — UPDATE FOR YOUR NETWORK
-// ============================================================
-const char* WIFI_SSID     = "Oppo A77s";
-const char* WIFI_PASSWORD = "9080061674";
-
-// Use a fixed local IP inside your router's LAN so the browser does not
-// lose the ESP32 after a DHCP lease refresh or after a code upload/reset.
-// Update these values to match your router's gateway and subnet.
-IPAddress staticIP(10, 129, 159, 200);
-IPAddress gateway(10, 129, 159, 1);
-IPAddress subnet(255, 255, 255, 0);
-IPAddress dns(1, 1, 1, 1);
-
-// ============================================================
 // Relay Polarity Configuration
-// Most standard 5V blue relay modules are Active-LOW (LOW = ON, HIGH = OFF).
-// If your relay module is Active-HIGH, change:
-//   RELAY_ON  to HIGH
-//   RELAY_OFF to LOW
+// Active-LOW relay modules: LOW = Relay ON (Engaged), HIGH = Relay OFF
 // ============================================================
 #define RELAY_ON                LOW    // Signal to turn Relay ON
 #define RELAY_OFF               HIGH   // Signal to turn Relay OFF
 
 // ============================================================
-// GPIO Pin Definitions (Master ESP32)
+// GPIO Pin Definitions
 // ============================================================
-// Onboard Blue Status LED
 #define PIN_LED_BUILTIN         2
 
 // HC-SR04 Ultrasonic Sensor
@@ -79,7 +63,7 @@ IPAddress dns(1, 1, 1, 1);
 // MQ-4 Methane Sensor (Analog ADC1)
 #define PIN_MQ4                 34
 
-// BMP180 (I2C — uses default SDA=21, SCL=22)
+// BMP180 (I2C uses default SDA=21, SCL=22)
 
 // DHT11 Ambient Temperature & Humidity
 #define PIN_DHT                 19
@@ -90,9 +74,9 @@ IPAddress dns(1, 1, 1, 1);
 
 // Relays
 #define PIN_RELAY_OUTLET        23   // Outlet Gate Valve Relay
-#define PIN_GRINDER             15   // Grinder Relay (change if wired to another pin like 27 or 14)
+#define PIN_GRINDER             15   // Grinder Relay
 
-// Stepper Inter-Board Trigger (Sends 3.3V HIGH to Nano D2)
+// Stepper Inter-Board Trigger (Sends 3.3V HIGH to Secondary ESP32)
 #define PIN_STEPPER_TRIGGER     25   // Primary Trigger Out
 #define PIN_STEPPER_TRIGGER_ALT 26   // Mirrored Backup Trigger Out
 
@@ -104,16 +88,15 @@ bool grinderOn   = false;
 bool outletOpen  = false;
 
 // ============================================================
-// Sensor Objects & Server
+// Sensor Objects
 // ============================================================
 Adafruit_BMP085   bmp;
 DHT               dht(PIN_DHT, DHT_TYPE);
 OneWire           oneWire(PIN_DS18B20);
 DallasTemperature ds18b20(&oneWire);
-WebServer         server(80);
 
 // ============================================================
-// Sensor Cache (updated in loop, served via HTTP)
+// Sensor Cache
 // ============================================================
 struct SensorCache {
   float distance    = 0.0;
@@ -124,50 +107,15 @@ struct SensorCache {
   float slurryTemp  = 0.0;
 } cache;
 
-// Timing for non-blocking sensor reads
-unsigned long lastSensorRead = 0;
-const unsigned long SENSOR_INTERVAL_MS = 2000;
+// Timing for non-blocking sensor reads and output stream
+unsigned long lastSensorRead   = 0;
+const unsigned long SENSOR_INTERVAL_MS = 1500;   // Stream data every 1.5 seconds
+
+// Serial input buffer for incoming commands
+String inputBuffer = "";
 
 // ============================================================
-// HTTP CORS Helper
-// ============================================================
-void addCORSHeaders() {
-  server.sendHeader("Access-Control-Allow-Origin",  "*");
-  server.sendHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-  server.sendHeader("Access-Control-Allow-Headers", "*");
-  server.sendHeader("Cache-Control",                "no-cache");
-}
-
-void handleOPTIONS() {
-  addCORSHeaders();
-  server.send(204);
-}
-
-// ============================================================
-// API: GET /api/data
-// ============================================================
-void handleApiData() {
-  // NOTE: CORS is handled globally by server.enableCORS(true) in setup().
-  // Do NOT call addCORSHeaders() here — duplicate headers break browser fetch.
-
-  StaticJsonDocument<256> doc;
-  doc["distance"]    = cache.distance;
-  doc["methane"]     = cache.methane;
-  doc["pressure"]    = cache.pressure;
-  doc["outsideTemp"] = cache.outsideTemp;
-  doc["humidity"]    = cache.humidity;
-  doc["slurryTemp"]  = cache.slurryTemp;
-  doc["stirrer"]     = stirrerOn;
-  doc["grinder"]     = grinderOn;
-  doc["outlet"]      = outletOpen;
-
-  String out;
-  serializeJson(doc, out);
-  server.send(200, "application/json", out);
-}
-
-// ============================================================
-// Actuator Logic (Used by both HTTP and Serial)
+// Actuator Logic
 // ============================================================
 void executeStirrer(bool state) {
   stirrerOn = state;
@@ -191,61 +139,6 @@ void executeOutlet(bool state) {
 }
 
 // ============================================================
-// API: Stirrer (Sets PIN 25 & PIN 26 HIGH / LOW)
-// ============================================================
-void handleStirrerOn() {
-  executeStirrer(true);
-  Serial.println("[COMMAND] STIRRER ON REQUESTED (HTTP)");
-  server.send(200, "application/json", "{\"ok\":true,\"stirrer\":true,\"pin_25\":\"HIGH\",\"voltage\":\"3.3V\"}");
-}
-
-void handleStirrerOff() {
-  executeStirrer(false);
-  Serial.println("[COMMAND] STIRRER OFF REQUESTED (HTTP)");
-  server.send(200, "application/json", "{\"ok\":true,\"stirrer\":false,\"pin_25\":\"LOW\",\"voltage\":\"0V\"}");
-}
-
-// ============================================================
-// API: Grinder
-// NOTE: The Grinder relay (PIN 15) is INDEPENDENT of the Stirrer/
-//       Stepper trigger (PIN 25/26). They must NEVER cross-control
-//       each other. The stepper is exclusively driven by handleStirrerOn/Off.
-// ============================================================
-void handleGrinderOn() {
-  executeGrinder(true);
-  Serial.println("[COMMAND] GRINDER ON REQUESTED (HTTP)");
-  server.send(200, "application/json", "{\"ok\":true,\"grinder\":true}");
-}
-
-void handleGrinderOff() {
-  executeGrinder(false);
-  Serial.println("[COMMAND] GRINDER OFF REQUESTED (HTTP)");
-  server.send(200, "application/json", "{\"ok\":true,\"grinder\":false}");
-}
-
-// ============================================================
-// API: Outlet Valve
-// ============================================================
-void handleOutletOpen() {
-  executeOutlet(true);
-  Serial.println("[COMMAND] OUTLET OPEN REQUESTED (HTTP)");
-  server.send(200, "application/json", "{\"ok\":true,\"outlet\":true}");
-}
-
-void handleOutletClose() {
-  executeOutlet(false);
-  Serial.println("[COMMAND] OUTLET CLOSED REQUESTED (HTTP)");
-  server.send(200, "application/json", "{\"ok\":true,\"outlet\":false}");
-}
-
-// ============================================================
-// 404 Handler
-// ============================================================
-void handleNotFound() {
-  server.send(404, "application/json", "{\"error\":\"Not found\"}");
-}
-
-// ============================================================
 // Sensor Reading — Ultrasonic (HC-SR04)
 // ============================================================
 float readUltrasonic() {
@@ -257,39 +150,13 @@ float readUltrasonic() {
 
   long duration = pulseIn(PIN_ECHO, HIGH, 30000);  // 30ms timeout
   if (duration == 0) return -1.0;
-  return duration * 0.034 / 2.0;                   // Distance in cm
+  return (float)(duration * 0.034 / 2.0);          // Distance in cm
 }
 
 // ============================================================
-// Sensor Reading — All Sensors (Non-blocking)
+// Sensor Reading — All Sensors & Serial Transmission
 // ============================================================
-void updateSensors() {
-  unsigned long now = millis();
-  if (now - lastSensorRead < SENSOR_INTERVAL_MS) return;
-  lastSensorRead = now;
-
-  // HC-SR04
-  float dist = readUltrasonic();
-  if (dist > 0) cache.distance = dist;
-
-  // MQ-4 (Analog ADC)
-  cache.methane = analogRead(PIN_MQ4);
-
-  // BMP180 (I2C)
-  cache.pressure = bmp.readPressure() / 100.0;   // Pa → hPa
-
-  // DHT11
-  float t = dht.readTemperature();
-  float h = dht.readHumidity();
-  if (!isnan(t)) cache.outsideTemp = t;
-  if (!isnan(h)) cache.humidity    = h;
-
-  // DS18B20
-  float slurryT = ds18b20.getTempCByIndex(0);
-  if (slurryT != DEVICE_DISCONNECTED_C) cache.slurryTemp = slurryT;
-  ds18b20.requestTemperatures();
-
-  // Send update over Serial
+void sendSensorData() {
   StaticJsonDocument<256> doc;
   doc["distance"]    = cache.distance;
   doc["methane"]     = cache.methane;
@@ -300,10 +167,84 @@ void updateSensors() {
   doc["stirrer"]     = stirrerOn;
   doc["grinder"]     = grinderOn;
   doc["outlet"]      = outletOpen;
-  
+
   String out;
   serializeJson(doc, out);
-  Serial.println(out);
+  Serial.println(out);   // Pure JSON line followed by newline
+  Serial.flush();
+}
+
+void updateSensors() {
+  unsigned long now = millis();
+  if (now - lastSensorRead < SENSOR_INTERVAL_MS) return;
+  lastSensorRead = now;
+
+  // HC-SR04 Ultrasonic
+  float dist = readUltrasonic();
+  if (dist > 0) cache.distance = dist;
+
+  // MQ-4 Methane (Analog ADC)
+  cache.methane = analogRead(PIN_MQ4);
+
+  // BMP180 Pressure (I2C)
+  float p = bmp.readPressure();
+  if (p > 30000 && p < 120000) {
+    cache.pressure = p / 100.0;   // Pa -> hPa
+  }
+
+  // DHT11 Ambient Temperature & Humidity
+  float t = dht.readTemperature();
+  float h = dht.readHumidity();
+  if (!isnan(t) && t > -20 && t < 80) cache.outsideTemp = t;
+  if (!isnan(h) && h >= 0 && h <= 100) cache.humidity   = h;
+
+  // DS18B20 Slurry Temperature
+  float slurryT = ds18b20.getTempCByIndex(0);
+  if (slurryT > -40.0 && slurryT < 100.0 && slurryT != DEVICE_DISCONNECTED_C) {
+    cache.slurryTemp = slurryT;
+  }
+  ds18b20.requestTemperatures();
+
+  // Stream data to USB Serial
+  sendSensorData();
+}
+
+// ============================================================
+// Process Incoming Serial Command
+// ============================================================
+void processCommand(const String& line) {
+  int startIdx = line.indexOf('{');
+  int endIdx   = line.lastIndexOf('}');
+  if (startIdx == -1 || endIdx == -1 || endIdx <= startIdx) return;
+
+  String jsonStr = line.substring(startIdx, endIdx + 1);
+  StaticJsonDocument<128> doc;
+  DeserializationError err = deserializeJson(doc, jsonStr);
+  if (err) return;
+
+  const char* cmd = doc["cmd"] | "";
+  bool handled = true;
+
+  if      (strcmp(cmd, "stirrerOn")   == 0) executeStirrer(true);
+  else if (strcmp(cmd, "stirrerOff")  == 0) executeStirrer(false);
+  else if (strcmp(cmd, "grinderOn")   == 0) executeGrinder(true);
+  else if (strcmp(cmd, "grinderOff")  == 0) executeGrinder(false);
+  else if (strcmp(cmd, "outletOpen")  == 0) executeOutlet(true);
+  else if (strcmp(cmd, "outletClose") == 0) executeOutlet(false);
+  else if (strcmp(cmd, "getData")     == 0) { sendSensorData(); return; }
+  else handled = false;
+
+  StaticJsonDocument<128> ack;
+  ack["ok"]      = handled;
+  ack["cmd"]     = cmd;
+  ack["stirrer"] = stirrerOn;
+  ack["grinder"] = grinderOn;
+  ack["outlet"]  = outletOpen;
+
+  String ackStr;
+  serializeJson(ack, ackStr);
+  Serial.println(ackStr);
+  Serial.flush();
 }
 
 // ============================================================
@@ -311,13 +252,7 @@ void updateSensors() {
 // ============================================================
 void setup() {
   Serial.begin(115200);
-  delay(500);
-
-  Serial.println();
-  Serial.println("==========================================");
-  Serial.println("  GOBARDHAN MASTER ESP32 FIRMWARE");
-  Serial.println("  Smart Biogas System Control Center");
-  Serial.println("==========================================");
+  delay(200);
 
   // ---- GPIO Setup ----
   pinMode(PIN_LED_BUILTIN,         OUTPUT);
@@ -328,112 +263,58 @@ void setup() {
   pinMode(PIN_STEPPER_TRIGGER,     OUTPUT);
   pinMode(PIN_STEPPER_TRIGGER_ALT, OUTPUT);
 
-  // Safe initial state:
+  // Safe default states: All actuators OFF, LED OFF
   digitalWrite(PIN_LED_BUILTIN,         LOW);
   digitalWrite(PIN_RELAY_OUTLET,        RELAY_OFF);
   digitalWrite(PIN_GRINDER,             RELAY_OFF);
   digitalWrite(PIN_STEPPER_TRIGGER,     LOW);
   digitalWrite(PIN_STEPPER_TRIGGER_ALT, LOW);
 
-  // ---- Sensor Initialization ----
+  // ---- Sensors Initialization ----
   Wire.begin(21, 22);
-
-  if (!bmp.begin()) {
-    Serial.println("[ERROR] BMP180 not detected on I2C (21/22). Check wiring.");
-  }
-
-  dht.begin();
-  ds18b20.begin();
+  bmp.begin();          // BMP180
+  dht.begin();          // DHT11
+  ds18b20.begin();      // DS18B20
   ds18b20.setWaitForConversion(false);
   ds18b20.requestTemperatures();
 
-  // ---- Wi-Fi Connection ----
-  Serial.print("Connecting to Wi-Fi: ");
-  Serial.println(WIFI_SSID);
-  WiFi.mode(WIFI_STA);
-  WiFi.config(staticIP, gateway, subnet, dns, dns);
-  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  // Initial sensor warm-up read
+  float initDist = readUltrasonic();
+  if (initDist > 0) cache.distance = initDist;
+  cache.methane = analogRead(PIN_MQ4);
+  float initP = bmp.readPressure();
+  if (initP > 30000 && initP < 120000) cache.pressure = initP / 100.0;
+  float initT = dht.readTemperature();
+  float initH = dht.readHumidity();
+  if (!isnan(initT)) cache.outsideTemp = initT;
+  if (!isnan(initH)) cache.humidity    = initH;
 
-  int attempts = 0;
-  while (WiFi.status() != WL_CONNECTED && attempts < 60) {
-    delay(500);
-    Serial.print(".");
-    attempts++;
-  }
-  Serial.println();
-
-  if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("[ERROR] Wi-Fi connection failed. Check SSID/password or router settings.");
-    Serial.println("        If this is a 2.4GHz-only network, connect the ESP32 to that band.");
-    delay(3000);
-    ESP.restart();
-  }
-
-  Serial.println("Wi-Fi Connected successfully!");
-  Serial.print("  -> Actual IP   : "); Serial.println(WiFi.localIP());
-  Serial.print("  -> Static IP   : "); Serial.println(staticIP);
-  Serial.print("  -> Gateway     : "); Serial.println(WiFi.gatewayIP());
-  Serial.print("  -> Subnet Mask : "); Serial.println(WiFi.subnetMask());
-
-  if (WiFi.localIP() != staticIP) {
-    Serial.println();
-    Serial.println("[WARN] *** Static IP was NOT accepted by the router! ***");
-    Serial.println("[WARN] The ESP32 is using DHCP-assigned IP above instead.");
-    Serial.println("[WARN] Update staticIP/gateway/subnet in the firmware to match.");
-    Serial.println("[WARN] Use the 'Actual IP' above in the dashboard connection field.");
-  } else {
-    Serial.println("  -> Static IP accepted. Enter this IP in the dashboard.");
-  }
-
-  // ---- HTTP API Routes (Handles any HTTP method including GET & OPTIONS) ----
-  server.on("/api/data",         handleApiData);
-  server.on("/api/stirrer/on",   handleStirrerOn);
-  server.on("/api/stirrer/off",  handleStirrerOff);
-  server.on("/api/grinder/on",   handleGrinderOn);
-  server.on("/api/grinder/off",  handleGrinderOff);
-  server.on("/api/outlet/open",  handleOutletOpen);
-  server.on("/api/outlet/close", handleOutletClose);
-
-  server.onNotFound(handleNotFound);
-
-  // Enable automatic CORS headers
-  server.enableCORS(true);
-
-  server.begin();
-  Serial.println("HTTP API Server Started.");
-  Serial.println("System Ready.");
-  Serial.println("==========================================");
-
-  // Initial sensor read
-  lastSensorRead = 0;
-  updateSensors();
+  // Print startup notification (as JSON so Web Serial doesn't choke)
+  Serial.println("{\"system\":\"GOBARDHAN\",\"version\":\"3.0-SERIAL\",\"ready\":true}");
+  Serial.flush();
 }
 
 // ============================================================
-// Main Loop
+// Main Loop — Non-blocking, Continuous
 // ============================================================
 void loop() {
-  server.handleClient();   // Handle incoming web dashboard requests
-  
-  if (Serial.available()) {
-    String line = Serial.readStringUntil('\n');
-    line.trim();
-    if (line.startsWith("{")) {
-      StaticJsonDocument<128> doc;
-      DeserializationError err = deserializeJson(doc, line);
-      if (!err) {
-        String cmd = doc["cmd"].as<String>();
-        if (cmd == "stirrerOn") executeStirrer(true);
-        else if (cmd == "stirrerOff") executeStirrer(false);
-        else if (cmd == "grinderOn") executeGrinder(true);
-        else if (cmd == "grinderOff") executeGrinder(false);
-        else if (cmd == "outletOpen") executeOutlet(true);
-        else if (cmd == "outletClose") executeOutlet(false);
-        
-        Serial.println("{\"ok\":true}"); // Ack
+  // Read incoming serial commands byte-by-byte
+  while (Serial.available() > 0) {
+    char c = (char)Serial.read();
+    if (c == '\n' || c == '\r') {
+      if (inputBuffer.length() > 0) {
+        processCommand(inputBuffer);
+        inputBuffer = "";
+      }
+    } else {
+      if (inputBuffer.length() < 256) {
+        inputBuffer += c;
+      } else {
+        inputBuffer = ""; // Overflow protection
       }
     }
   }
 
-  updateSensors();         // Periodic sensor reads every 2 seconds
+  // Periodic sensor readings and streaming
+  updateSensors();
 }
